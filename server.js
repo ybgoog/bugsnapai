@@ -8,10 +8,107 @@ import db from './db.js';
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json());
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+function detectVideoMimeType(base64, fallbackMime = '', fileName = '') {
+  try {
+    const sliceLen = Math.ceil(24 * 4 / 3);
+    const prefixBase64 = base64.slice(0, sliceLen);
+    const binaryBuffer = Buffer.from(prefixBase64, 'base64');
+    
+    // 1. WebM / Matroska EBML: [0x1A, 0x45, 0xDF, 0xA3]
+    if (binaryBuffer[0] === 0x1A && binaryBuffer[1] === 0x45 && binaryBuffer[2] === 0xDF && binaryBuffer[3] === 0xA3) {
+      return 'video/webm';
+    }
+
+    // 2. MP4 ftyp box: 'ftyp' (0x66, 0x74, 0x79, 0x70) at offset 4
+    if (binaryBuffer[4] === 0x66 && binaryBuffer[5] === 0x79 && binaryBuffer[6] === 0x79 && binaryBuffer[7] === 0x70) {
+      return 'video/mp4';
+    }
+  } catch (e) {
+    console.warn('MIME type magic detection failed on server:', e);
+  }
+
+  const lowerName = fileName.toLowerCase();
+  if (lowerName.endsWith('.webm') || lowerName.endsWith('.mkv')) {
+    return 'video/webm';
+  }
+  if (lowerName.endsWith('.mp4')) {
+    return 'video/mp4';
+  }
+  if (lowerName.endsWith('.mov') || lowerName.endsWith('.qt')) {
+    return 'video/quicktime';
+  }
+
+  const lowerMime = (fallbackMime || '').toLowerCase();
+  if (lowerMime && lowerMime !== 'application/octet-stream' && lowerMime.startsWith('video/')) {
+    return lowerMime;
+  }
+
+  return 'video/mp4';
+}
+
+// Generate bug report from video
+app.post('/api/generate-report', async (req, res) => {
+  const { videoBase64, mimeType, fileName } = req.body;
+  if (!videoBase64) {
+    return res.status(400).json({ error: 'videoBase64 is required' });
+  }
+
+  if (!process.env.GEMINI_API_KEY) {
+    return res.status(500).json({ error: 'GEMINI_API_KEY is not configured in .env' });
+  }
+
+  try {
+    const actualMimeType = detectVideoMimeType(videoBase64, mimeType, fileName);
+    
+    let activePromptText = '';
+    let promptId = null;
+    try {
+      const activePrompt = db.prepare('SELECT id, version, prompt_text FROM prompts WHERE is_active = 1 LIMIT 1').get();
+      if (activePrompt) {
+        activePromptText = activePrompt.prompt_text;
+        promptId = activePrompt.id;
+      }
+    } catch (dbErr) {
+      console.warn('Failed to query prompt from db:', dbErr);
+    }
+
+    const aiClient = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    const response = await aiClient.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: [
+        {
+          parts: [
+            { text: 'Analyze this screen recording and generate a highly detailed bug report. Use bolding, bullet points, and clear sections to highlight key findings, errors, and critical steps. Ensure the output is in clean Markdown (.md) format.' },
+            {
+              inlineData: {
+                data: videoBase64,
+                mimeType: actualMimeType,
+              },
+            },
+          ],
+        },
+      ],
+      config: {
+        systemInstruction: (activePromptText ? activePromptText + '\n\n' : '') + '**Additional Formatting Instruction:** Use Markdown syntax effectively. Use `code blocks` for technical details, **bold text** for emphasis on critical issues, and clear headers. Ensure the report is professional and easy for a developer to scan quickly.',
+      },
+    });
+
+    const reportText = response.text || 'Failed to generate bug report.';
+    res.json({ text: reportText, promptId });
+  } catch (err) {
+    console.error('Failed to generate bug report:', err);
+    res.status(500).json({ 
+      error: err.message || 'Internal server error while generating report',
+      details: err.status || err.code || null
+    });
+  }
+});
 
 // Fetch active system prompt
 app.get('/api/prompt', (req, res) => {

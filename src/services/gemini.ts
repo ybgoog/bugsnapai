@@ -84,6 +84,34 @@ export function detectVideoMimeType(base64: string, fallbackMime: string, fileNa
 }
 
 export async function generateBugReport(videoBase64: string, mimeType: string, fileName: string = ""): Promise<{ text: string; promptId: number | null }> {
+  // 1. Try server-side endpoint first (keeps API key secure and uses runtime environment variables)
+  try {
+    const backendRes = await fetch('/api/generate-report', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ videoBase64, mimeType, fileName }),
+    });
+
+    if (backendRes.ok) {
+      const data = await backendRes.json();
+      return { text: data.text, promptId: data.promptId };
+    }
+
+    const errData = await backendRes.json().catch(() => null);
+    if (errData && errData.error) {
+      throw new Error(errData.error);
+    }
+  } catch (backendErr: any) {
+    console.warn("Backend report generation endpoint failed or unavailable, checking client fallback:", backendErr);
+    // If backend gave a descriptive API error, propagate it
+    if (backendErr.message && !backendErr.message.includes('fetch') && !backendErr.message.includes('Failed to fetch')) {
+      throw backendErr;
+    }
+  }
+
+  // 2. Client-side fallback
   const actualMimeType = detectVideoMimeType(videoBase64, mimeType, fileName);
   console.log(`MIME Correction: Original browser MIME type is "${mimeType}" for file "${fileName}". Actual detected MIME type sent to Gemini is "${actualMimeType}".`);
 
@@ -110,7 +138,7 @@ export async function generateBugReport(videoBase64: string, mimeType: string, f
   });
   
   const response: GenerateContentResponse = await ai.models.generateContent({
-    model: "gemini-3.5-flash",
+    model: "gemini-2.5-flash",
     contents: [
       {
         parts: [
