@@ -1,0 +1,5 @@
+{
+  "name": "BugSnap AI",
+  "description": "Automated bug report generator from screen recordings using Gemini AI.",
+  "requestFramePermissions": []
+}
