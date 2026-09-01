@@ -80,7 +80,7 @@ app.post('/api/generate-report', async (req, res) => {
 
     const aiClient = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
     const response = await aiClient.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.6-flash',
       contents: [
         {
           parts: [
